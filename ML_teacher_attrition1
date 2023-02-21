@@ -1,0 +1,228 @@
+#PREP THE DATA 
+
+missing <- function(text) {
+  var <- as.character(text)
+  length(which(is.na(findat[[var]])))
+}
+empty <- function(text) {
+  var <- as.character(text)
+  length(which(findat[[var]] == ""))
+}
+
+#we now have data for 2018 - 2023. We will need to classify them
+findat <- read.csv("~/Downloads/INDEP/teacher_attrition_covid/with_mobility_s275-18-23.csv")
+
+#we have to decide on which variables we are going to choose
+#according to literature, we will include:
+
+#dis - district
+table(findat$dis)
+missing("dis")
+
+#hispanic
+table(findat$hispanic) #55 rows empty 
+
+#exp - certified years of experience
+empty("exp")
+missing("exp") #183 missing
+
+#tfinsal - total salary
+table(findat$tfinsal)
+missing("tfinsal") #2 missing
+empty("tfinsal")
+
+#cis - annual insurance benefits
+missing("cins") #missing 7
+empty("cins")
+
+#sex - gender
+missing("sex")
+empty("sex") #9 empty
+table(findat$sex) #3 types
+#gender is important so we will also delete ones with no gender identity
+
+
+#hdeg - higher ed degree #too much missingness might not be able to use
+table(findat$hdeg) #m = missing?, there is 1 zero, which we shall remove
+empty("hdeg")
+
+#race - staff race - we're gonna need to recode this
+table(findat$race)
+empty("race") #476 empty
+missing("race")
+
+#codist - school district
+table(findat$codist)
+empty("codist")
+missing("codist")
+
+#county
+length(unique(findat$cou))
+missing("cou")
+empty("cou")
+
+
+#now we will supplement data on county
+#https://ofm.wa.gov/pop/geographic/codes/geographic_codes.xlsx
+geo <- read.csv("~/Downloads/INDEP/teacher_attrition_covid/geographic_codes.csv")
+
+#join data to create a new data variable
+newdat <- findat %>% left_join(geo, c("cou" = "COUNTYN"))
+
+#school district table
+#https://eds.ospi.k12.wa.us/DirectoryEDS.aspx
+dis <- read.csv("~/Downloads/INDEP/teacher_attrition_covid/dis_directory.csv")
+
+#join data again
+newdat <- newdat %>% left_join(dis, c("codist" = "DistrictCode"))
+
+#now we are ready to join some demographic data e.g., crime rate
+#I added the perc white variable - which is the percentage of white people
+
+#https://wcrer.be.uw.edu/archived-reports/
+house <- read.csv("~/Downloads/INDEP/teacher_attrition_covid/medhousing.csv", header = TRUE)
+
+
+newdat <- newdat %>% left_join(house, c("COUNTY_NAME" = "County"))
+
+
+#now we are going to take care of race as a variable. We can see that race is basically collected using maximum representation method
+table(newdat$race) #I am going to exclude those with no race data, because this is an important part
+newdat <- newdat %>% filter(race != "")
+table(newdat$race)
+
+#we will create these binary variables: A, I, B, P, W
+
+install.packages("stringr")
+library("stringr")  
+
+newdat <- newdat %>% mutate(raceA = case_when(
+  str_detect(race, 'A') == TRUE ~ 1,
+  TRUE ~ 0
+)) %>% mutate(raceI = case_when(
+  str_detect(race, 'I') == TRUE ~ 1,
+  TRUE ~ 0
+)) %>% mutate(raceB = case_when(
+  str_detect(race, 'B') == TRUE ~ 1,
+  TRUE ~ 0
+)) %>% mutate(raceP = case_when(
+  str_detect(race, 'P') == TRUE ~ 1,
+  TRUE ~ 0
+)) %>% mutate(raceW = case_when(
+  str_detect(race, 'W') == TRUE ~ 1,
+  TRUE ~ 0
+))
+
+#delete ones with no gender identity
+newdat <- newdat %>% filter(sex != "")
+#recode sex - we have to make sure that there is no character
+newdat <- newdat %>% mutate(sex = case_when(
+  str_detect(sex, 'F') == TRUE ~ 1,
+  str_detect(sex, 'M') == TRUE ~ 2,
+  TRUE ~ 0,
+))
+
+
+#we also need to recode hispanic
+newdat <- newdat %>% filter(hispanic != "")
+newdat <- newdat %>% mutate(hispanic = case_when(
+  str_detect(hispanic, 'Y') == TRUE ~ 1,
+  TRUE ~ 0
+))
+newdat$hispanic <- as.integer(newdat$hispanic) #be careful this is just a quick fix
+
+#now we need to know which are factors
+newdat$DistrictName <- as.factor(newdat$DistrictName)
+newdat$COUNTY_NAME <- as.factor(newdat$COUNTY_NAME)
+newdat$sex <- as.factor(newdat$sex)
+newdat$raceA <- as.integer(newdat$raceA)
+newdat$raceB <- as.integer(newdat$raceB)
+newdat$raceI <- as.integer(newdat$raceI)
+newdat$raceP <- as.integer(newdat$raceP)
+newdat$raceW <- as.integer(newdat$raceW)
+
+#transform all the labels into appropriate format
+newdat$left_after_2018 <- as.integer(newdat$left_after_2018)
+
+#start with the newdat18
+
+newdat18 <- newdat %>% filter(schyear == 2018)
+
+#WE ARE NOW READY TO DO THE MODEL#
+#install.packages("xgboost")
+library(xgboost)
+#install.packages("caTools")
+library(caTools)
+#install.packages("cvms")
+library(cvms)
+#install.packages("caret")
+library(caret)
+install.packages("fastDummies")
+library(fastDummies)
+library(Matrix)
+
+
+
+var <- c("DistrictName", "COUNTY_NAME", "sex", "cins", "tfinsal", "exp", "hispanic", "MED_INC_2017", "MED_INC_2018",
+"MED_INC_2019", "MED_INC_2020", "perc_white",
+"raceA", "raceB", "raceI", "raceP", "raceW", "Zipcode")
+
+catvar <- c("DistrictName", "COUNTY_NAME", "sex", "Zipcode")
+
+#first we use catools to split the data into train and test
+sample_split <- caTools::sample.split(Y = newdat18$left_after_2018, SplitRatio = 0.7)
+train_set <- subset(x = newdat18, sample_split == TRUE)
+test_set <- subset(x = newdat18, sample_split == FALSE)
+
+y_train <- as.integer(train_set$left_after_2018) 
+y_test <- as.integer(test_set$left_after_2018) 
+x_train <- train_set[,var]
+x_test <- test_set[,var]
+
+traincomp <- cbind(y_train, x_train)
+table(traincomp$y_train)
+
+#we need to dummy everything for xgboost to work
+#sparse_matrix_train <- Matrix::sparse.model.matrix(y_train ~ ., data = traincomp)[,-1]
+#X_train_dmat = xgb.DMatrix(sparse_matrix_train, label = y_train)
+
+
+
+
+x_train <- fastDummies::dummy_cols(x_train)
+x_train <- x_train %>% select(-c(DistrictName, COUNTY_NAME, sex, Zipcode))
+
+x_test <- fastDummies::dummy_cols(x_test)
+x_test <- x_test %>% select(-c(DistrictName, COUNTY_NAME, sex, Zipcode))
+
+str(x_train)
+
+#we have to use DMatrix because this is how XGBoost store data. It is a specific data structure
+#used to store data in a way optimized for memory efficiency and training speed.
+
+
+xgb_train <- xgboost::xgb.DMatrix(data = as.matrix(x_train), label = y_train)
+xgb_test <- xgboost::xgb.DMatrix(data = as.matrix(x_test), label = y_test)
+
+#we will go with the most basic parameter values
+xgb_params <- list(
+  booster = "gbtree",
+  eta = 0.01,
+  max_depth = 8,
+  gamma = 4,
+  subsample = 0.75,
+  colsample_bytree = 1,
+  objective = "multi:softprob",
+  eval_metric = "mlogloss",
+  num_class = 2
+)
+
+
+#RUN THE MODEL
+xgb_model <- xgb.train(
+  params = xgb_params,
+  data = xgb_train,
+  nrounds = 5000,
+  verbose = 1
+)
+xgb_model
